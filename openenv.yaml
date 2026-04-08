@@ -1,0 +1,82 @@
+name: blood_bank
+title: "Blood Bank Allocation System"
+description: |
+  A reinforcement learning environment simulating real-world blood bank operations.
+  An agent manages a blood bank inventory, allocates limited units to hospital requests,
+  and must balance competing objectives: fulfilling urgent requests, minimizing wastage,
+  and handling stochastic demand over time.
+version: "0.1.0"
+author: "OpenEnv Competitor"
+environment_class: "env.environment.BloodBankEnv"
+observation_type: "env.models.Observation"
+action_type: "env.models.Action"
+reward_type: "env.models.Reward"
+
+# Task definitions (3 levels: easy, medium, hard)
+tasks:
+  - id: 0
+    name: "Easy Task"
+    description: "Manage blood bank with low request volume and low urgency."
+    difficulty: "easy"
+    max_timesteps: 100
+    expected_score: ">0.7"
+    
+  - id: 1
+    name: "Medium Task"
+    description: "Handle moderate request volume with mixed urgency levels. Agent must prioritize urgent cases."
+    difficulty: "medium"
+    max_timesteps: 150
+    expected_score: ">0.6"
+    
+  - id: 2
+    name: "Hard Task"
+    description: "Manage high-pressure scenario with frequent urgent requests and severe time constraints."
+    difficulty: "hard"
+    max_timesteps: 150
+    expected_score: ">0.5"
+
+# Environment specs
+action_space:
+  type: "discrete"
+  shape: [5, 4]
+  description: "Allocation matrix: 5 requests × 4 blood types. Each cell = units to allocate."
+  
+observation_space:
+  type: "structured"
+  fields:
+    - name: "timestep"
+      description: "Current timestep (0 to max_timesteps)"
+    - name: "remaining_timesteps"
+      description: "Timesteps left in episode"
+    - name: "inventory_O"
+      description: "Units of O blood type in stock"
+    - name: "inventory_A"
+      description: "Units of A blood type in stock"
+    - name: "inventory_B"
+      description: "Units of B blood type in stock"
+    - name: "inventory_AB"
+      description: "Units of AB blood type in stock"
+    - name: "avg_expiry_O"
+      description: "Average days to expiry for O blood"
+    - name: "avg_expiry_A"
+      description: "Average days to expiry for A blood"
+    - name: "avg_expiry_B"
+      description: "Average days to expiry for B blood"
+    - name: "avg_expiry_AB"
+      description: "Average days to expiry for AB blood"
+    - name: "active_requests"
+      description: "List of up to 5 pending hospital requests with blood_type, quantity, urgency, wait_time"
+    - name: "task_id"
+      description: "Current task difficulty (0=easy, 1=medium, 2=hard)"
+
+# Requirements
+requirements:
+  - numpy
+  - pydantic
+
+# Grading criteria
+grading:
+  easy: "Minimize wastage and fulfill >60% of requests."
+  medium: "Fulfill >70% of requests; prioritize urgent (urgency=2) cases."
+  hard: "Maintain minimal critical backlog; urgent case fulfillment critical."
+
