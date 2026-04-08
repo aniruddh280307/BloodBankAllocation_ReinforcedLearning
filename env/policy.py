@@ -1,17 +1,17 @@
-"""Baseline policy: greedy allocation strategy."""
-import random
+"""Baseline policy: improved greedy allocation strategy."""
 from typing import List
 
 
 def greedy_policy(obs) -> List[int]:
     """
-    Enhanced greedy allocation strategy:
+    Improved greedy allocation strategy with balanced distribution:
+    
     1. Sort requests by priority: urgency DESC → wait_time DESC → quantity DESC
-    2. Allocate full requested quantity from compatible donors
-    3. Prefer specific blood types first, fall back to universal O-type
-    4. Reserve small O-type buffer for future critical requests
-    5. Avoid zero-action when inventory and requests exist
-
+    2. First pass: limited balanced allocation (max 2 units per request per blood type)
+    3. Second pass: fulfill remaining high-priority requests fully
+    4. Zero-action guard: ensure at least 1 unit allocated if inventory exists
+    5. O-type reserve for future critical requests
+    
     Returns: flattened allocation matrix (5x4 = 20 values)
     """
     # Parse observation
@@ -25,8 +25,7 @@ def greedy_policy(obs) -> List[int]:
     blood_types  = ['O', 'A', 'B', 'AB']
     max_requests = 5
 
-    # ── Dead-zone guard ──────────────────────────────────────────────────────
-    # If there is literally nothing in stock, no allocation is possible.
+    # Dead-zone guard: no inventory = no allocation possible
     if sum(inventories.values()) == 0:
         return [0] * (max_requests * 4)
 
@@ -47,42 +46,69 @@ def greedy_policy(obs) -> List[int]:
         if qty > 0:
             active_reqs.append((i, qty, urgency, wait, blood_type))
 
-    # ── Dead-zone guard (no pending requests) ────────────────────────────────
+    # Dead-zone guard: no pending requests = no allocation needed
     if not active_reqs:
         return [0] * (max_requests * 4)
 
-    # ── ENHANCED PRIORITY SORTING ─────────────────────────────────────────────
-    # Sort by: urgency (DESC) → wait_time (DESC) → quantity (DESC)
-    # This ensures critical and older requests get prioritized
+    # Sort by priority: urgency DESC → wait_time DESC → quantity DESC
     active_reqs.sort(key=lambda x: (-x[2], -x[3], -x[1]))
 
-    # Build allocation matrix (5 × 4)
-    allocation_matrix  = [[0] * 4 for _ in range(max_requests)]
-    inventories_copy   = inventories.copy()
+    allocation_matrix = [[0] * 4 for _ in range(max_requests)]
+    inventories_copy = inventories.copy()
 
-    # ── RESERVE BUFFER ────────────────────────────────────────────────────────
-    # Keep small O-type reserve (universal donor) for critical cases
-    o_reserve = max(3, inventory_O // 5)  # Reserve 20% or minimum 3 units
+    # Reserve O-type buffer for future critical requests
+    o_reserve = max(3, inventory_O // 5)
     available_o = max(0, inventories_copy['O'] - o_reserve)
 
+    # ─── FIRST PASS: Balanced allocation (max 2 units per request per blood type) ────
     for orig_idx, quantity, urgency, wait_time, blood_type in active_reqs:
-        if orig_idx >= max_requests:
-            break
-        if quantity <= 0:
+        if orig_idx >= max_requests or quantity <= 0:
             continue
 
         compatible = get_compatible_donors(blood_type)
         remaining = quantity
 
-        # ── PRIORITIZED ALLOCATION ────────────────────────────────────────────
-        # For each compatible blood type (in order of preference)
         for donor in compatible:
             if remaining <= 0:
                 break
             
             donor_idx = blood_types.index(donor)
             
-            # Special handling: don't use reserved O-type unless necessary
+            # Limit per-request allocation in first pass
+            if donor == 'O':
+                available = available_o
+            else:
+                available = inventories_copy[donor]
+            
+            # Key change: limit to 2 units per request per blood type in first pass
+            allocate = min(remaining, available, 2)
+            
+            if allocate > 0:
+                allocation_matrix[orig_idx][donor_idx] += allocate
+                inventories_copy[donor] -= allocate
+                if donor == 'O':
+                    available_o -= allocate
+                remaining -= allocate
+
+    # ─── SECOND PASS: Fulfill remaining high-priority requests fully ────────
+    for orig_idx, quantity, urgency, wait_time, blood_type in active_reqs:
+        if orig_idx >= max_requests or quantity <= 0:
+            continue
+
+        # Check if request is still partially unfulfilled
+        current_alloc = sum(allocation_matrix[orig_idx])
+        if current_alloc >= quantity:
+            continue  # Already fully allocated in first pass
+
+        compatible = get_compatible_donors(blood_type)
+        remaining = quantity - current_alloc
+
+        for donor in compatible:
+            if remaining <= 0:
+                break
+            
+            donor_idx = blood_types.index(donor)
+            
             if donor == 'O':
                 available = available_o
             else:
@@ -97,9 +123,7 @@ def greedy_policy(obs) -> List[int]:
                     available_o -= allocate
                 remaining -= allocate
 
-        # ── FALLBACK: Use reserved O-type if critical request unfulfilled ─────
-        # If this is a high-urgency request (urgency == 2) and still unfulfilled,
-        # dip into the O-type reserve
+        # Fallback: use O-type reserve for critical unfulfilled requests
         if remaining > 0 and urgency == 2 and o_reserve > 0:
             o_idx = blood_types.index('O')
             allocate = min(remaining, o_reserve)
@@ -107,7 +131,19 @@ def greedy_policy(obs) -> List[int]:
                 allocation_matrix[orig_idx][o_idx] += allocate
                 inventories_copy['O'] -= allocate
                 o_reserve -= allocate
-                remaining -= allocate
+
+    # ─── ZERO-ACTION FIX ─────────────────────────────────────────────────────
+    # If no allocation made but inventory and requests exist, allocate 1 unit to top priority
+    total_allocation = sum(sum(row) for row in allocation_matrix)
+    if total_allocation == 0 and sum(inventories_copy.values()) > 0 and active_reqs:
+        top_priority_idx, top_qty, top_urgency, top_wait, top_blood = active_reqs[0]
+        if top_priority_idx < max_requests:
+            compatible = get_compatible_donors(top_blood)
+            for donor in compatible:
+                donor_idx = blood_types.index(donor)
+                if inventories_copy[donor] > 0:
+                    allocation_matrix[top_priority_idx][donor_idx] = 1
+                    break
 
     # Flatten (row-major)
     flattened = []
@@ -132,8 +168,3 @@ def get_compatible_donors(recipient_type: str) -> List[str]:
         'AB': ['AB', 'A', 'B', 'O'],  # prefer AB, then specific, then O
     }
     return compatibility.get(recipient_type, ['O'])
-
-
-def random_policy(obs) -> List[int]:
-    """Random allocation (baseline for comparison)."""
-    return [random.randint(0, 2) for _ in range(20)]

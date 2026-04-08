@@ -33,8 +33,12 @@ def run_task(task_id: int, task_name: str, max_steps: int = 100) -> Tuple[float,
     Returns:
         score (0.0-1.0), num_steps, list of rewards, success bool
     """
-    # Print START block for this task
-    print(f"[START] task={task_name}")
+    # Get environment name and model name
+    env_name = "blood_bank"
+    model_name = os.getenv('MODEL_NAME', 'greedy-baseline')
+    
+    # Print START block for this task (OpenEnv format)
+    print(f"[START] task={task_name} env={env_name} model={model_name}")
     
     env = BloodBankEnv(task_id=task_id, max_timesteps=max_steps)
     obs = env.reset()
@@ -54,8 +58,8 @@ def run_task(task_id: int, task_name: str, max_steps: int = 100) -> Tuple[float,
             rewards.append(reward)
             
             # Print step info in OpenEnv format
-            action_str = ','.join(str(a) for a in action[:8])  # truncate for brevity
-            print(f"[STEP] step={steps} action=[{action_str}...] reward={reward:.2f} done={format_bool(done)} error=null")
+            action_str = str(action[:8]).replace(' ', '')  # truncate and format
+            print(f"[STEP] step={steps} action={action_str} reward={reward:.2f} done={format_bool(done)} error=null")
     
     except Exception as e:
         error = str(e)
@@ -66,7 +70,9 @@ def run_task(task_id: int, task_name: str, max_steps: int = 100) -> Tuple[float,
         score = total_reward / max_total_reward if max_total_reward > 0 else 0.0
         score = max(0.0, min(1.0, score))
         success = score >= 0.1
-        print(f"[END] success={format_bool(success)} steps={steps} score={score:.2f}")
+        # Format rewards as comma-separated values
+        rewards_str = ','.join(f"{r:.2f}" for r in rewards)
+        print(f"[END] success={format_bool(success)} steps={steps} score={score:.2f} rewards={rewards_str}")
         return score, steps, rewards, False
     
     # Compute independent score for this task
@@ -76,8 +82,11 @@ def run_task(task_id: int, task_name: str, max_steps: int = 100) -> Tuple[float,
     score = max(0.0, min(1.0, score))
     success = score >= 0.1
     
-    # Print END block for this task
-    print(f"[END] success={format_bool(success)} steps={steps} score={score:.2f}")
+    # Format rewards as comma-separated values
+    rewards_str = ','.join(f"{r:.2f}" for r in rewards)
+    
+    # Print END block for this task (OpenEnv format)
+    print(f"[END] success={format_bool(success)} steps={steps} score={score:.2f} rewards={rewards_str}")
     
     return score, steps, rewards, success
 
