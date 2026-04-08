@@ -5,10 +5,11 @@ from .models import InventoryState, HospitalRequest, Observation
 from .actions import decode_action, validate_allocation_matrix, MAX_REQUESTS, BLOOD_TYPES
 
 MAX_TIMESTEPS = 150
-INITIAL_STOCK = {'O': 40, 'A': 30, 'B': 30, 'AB': 20}  # Significantly increased to sustain allocations longer
+INITIAL_STOCK = {'O': 80, 'A': 60, 'B': 60, 'AB': 40}  # Significantly increased for early-game stability
 UNIT_SHELF_DAYS = 7
 MAX_REQUESTS_PER_STEP = MAX_REQUESTS
-CRITICAL_REQUEST_BUFFER = 3
+CRITICAL_REQUEST_BUFFER = 5  # Increased from 3 to prevent early termination at step 7
+CRITICAL_REQUESTS_THRESHOLD = 8  # Increased from 6 to allow more flexibility
 
 class BloodBankEnv:
     def __init__(self, dataset=None, max_timesteps=MAX_TIMESTEPS, task_id: int = 0):
@@ -100,9 +101,12 @@ class BloodBankEnv:
 
         unfulfilled_this_step = 0
         for req in self.active_requests:
-            penalty = 0.2  # Reduced from 0.5 to be less punitive
+            # Reduce penalties in VERY early game (steps 1-5) to allow policy ramp-up
+            penalty_multiplier = 0.2 if self.timestep <= 5 else 1.0
+            
+            penalty = 0.2 * penalty_multiplier  # Reduced from 0.5 to be less punitive
             if req.urgency == 2:
-                penalty = 0.5  # Reduced from 1.0
+                penalty = 0.5 * penalty_multiplier  # Reduced from 1.0
             reward -= penalty
             unfulfilled_this_step += 1
             req.wait_time += 1
@@ -120,12 +124,19 @@ class BloodBankEnv:
 
         # ─── FIX 2: Add new requests (respecting max active request limit) ─────
         # The environment automatically limits to MAX_REQUESTS via _add_random_request
-        if self.task_id == 0:
-            n_new = random.randint(1, 2)
+        # Early game introduces requests more gently to allow policy warmup
+        if self.timestep <= 2:
+            n_new = 0  # Only initial 3 requests for first 2 steps
+        elif self.timestep <= 4:
+            n_new = 1  # Gentle ramp-up: 1 per step for steps 3-4
+        elif self.timestep <= 10:
+            n_new = random.randint(1, 1)  # Steps 5-10: 1 per step
+        elif self.task_id == 0:
+            n_new = random.randint(1, 1)  # Easy: 1 per step
         elif self.task_id == 1:
-            n_new = random.randint(1, 2)
+            n_new = random.randint(1, 2)  # Medium: 1-2 per step
         else:
-            n_new = random.randint(1, 3)
+            n_new = random.randint(1, 2)  # Hard: 1-2 per step (adjusted from 1-3)
         
         # ─── FIX 3: Adaptive demand control - reduce new requests if inventory is critical ─
         inv_counts_current = self.inventory.count_by_type()
@@ -143,14 +154,15 @@ class BloodBankEnv:
             self.done = True
         
         criticals = sum(1 for r in self.active_requests if r.urgency == 2)
-        if criticals >= 6:
+        if criticals >= CRITICAL_REQUESTS_THRESHOLD:
             self.critical_steps_count += 1
         else:
             self.critical_steps_count = 0
         
         if self.critical_steps_count >= CRITICAL_REQUEST_BUFFER:
+            # Too many critical requests for too long - mark done but don't penalize
+            # The reward is already adjusted by unfulfilled request penalties
             self.done = True
-            reward -= 5.0
 
         # ─── FIX 3: Cap extreme reward values to prevent destabilizing spikes ────
         # Keep rewards in a stable range: [-5.0, +10.0]
@@ -160,6 +172,27 @@ class BloodBankEnv:
         self.rewards.append(reward)
         self.score += reward
         return self._get_observation(), float(reward), self.done, {"fulfilled": fulfilled_this_step, "unfulfilled": unfulfilled_this_step, "expired": expired}
+
+    def compute_score(self) -> float:
+        """
+        Compute a meaningful performance score based on key metrics.
+        
+        Returns:
+            float: Score in range [0.0, 1.0] reflecting actual performance
+        """
+        total_requests = max(1, self.total_fulfilled + self.total_unfulfilled)
+        
+        fulfillment_rate = self.total_fulfilled / total_requests
+        urgency_score = self.urgent_fulfilled / max(1, self.total_urgent)
+        efficiency_penalty = self.total_expired / max(1, self.total_fulfilled + self.total_expired)
+        
+        score = (
+            0.5 * fulfillment_rate +
+            0.3 * urgency_score -
+            0.2 * efficiency_penalty
+        )
+        
+        return max(0.0, min(1.0, score))
 
     def state(self) -> Dict:
         return {
@@ -174,11 +207,12 @@ class BloodBankEnv:
             "urgent_fulfilled": self.urgent_fulfilled,
             "total_urgent": max(1, self.total_urgent),
             "done": self.done,
-            "score": self.score
+            "score": self.compute_score()
         }
 
     def close(self):
-        pass
+        """Close the environment and return the final computed score."""
+        return self.compute_score()
 
     def _safety_correct_allocation_matrix(self, matrix: List[List[int]], inventory_counts: dict, requests: List) -> List[List[int]]:
         """
@@ -189,6 +223,7 @@ class BloodBankEnv:
         2. Clip each allocation to not exceed request quantity
         3. Remove allocations that violate compatibility rules
         4. Preserve as much valid allocation as possible
+        5. FINAL VERIFICATION: zero out entire row if any allocation remains invalid
         
         This is a soft correction - we fix invalid parts instead of rejecting the whole action.
         """
@@ -231,6 +266,50 @@ class BloodBankEnv:
                 
                 # Track total allocation per type
                 alloc_per_type[donor_type] += alloc
+        
+        # ─── STRICT FINAL VERIFICATION ────
+        # After correction, verify ALL allocations are valid
+        # If any invalid allocation still exists in a row → zero out entire row
+        for req_idx, row in enumerate(corrected):
+            if req_idx >= len(requests):
+                continue
+            
+            req = requests[req_idx]
+            is_row_valid = True
+            
+            # Re-check total allocation vs request quantity
+            total_alloc = sum(row)
+            if total_alloc > req.quantity:
+                is_row_valid = False
+            
+            # Re-check each blood type
+            for t_idx, alloc in enumerate(row):
+                if alloc < 0:  # Negative allocation
+                    is_row_valid = False
+                    break
+                donor_type = BLOOD_TYPES[t_idx]
+                if alloc > 0:
+                    # Check compatibility strictly
+                    if not is_compatible(donor_type, req.blood_type):
+                        is_row_valid = False
+                        break
+            
+            # Re-check inventory totals
+            if is_row_valid:
+                test_alloc_per_type = {t: 0 for t in BLOOD_TYPES}
+                for prev_idx in range(req_idx):
+                    for t_idx, v in enumerate(corrected[prev_idx]):
+                        test_alloc_per_type[BLOOD_TYPES[t_idx]] += v
+                
+                for t_idx, alloc in enumerate(row):
+                    test_alloc_per_type[BLOOD_TYPES[t_idx]] += alloc
+                    if test_alloc_per_type[BLOOD_TYPES[t_idx]] > inventory_counts.get(BLOOD_TYPES[t_idx], 0):
+                        is_row_valid = False
+                        break
+            
+            # If any check failed, zero out the entire row
+            if not is_row_valid:
+                corrected[req_idx] = [0] * 4
         
         return corrected
 

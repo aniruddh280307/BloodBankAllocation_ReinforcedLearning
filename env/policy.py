@@ -5,10 +5,12 @@ from typing import List
 
 def greedy_policy(obs) -> List[int]:
     """
-    Aggressive greedy allocation strategy:
-    1. Sort requests by urgency (high > medium > low) and wait time
-    2. For each request, allocate the FULL requested quantity from compatible types
-    3. Never scale down — partial fulfillment is always better than no fulfillment
+    Enhanced greedy allocation strategy:
+    1. Sort requests by priority: urgency DESC → wait_time DESC → quantity DESC
+    2. Allocate full requested quantity from compatible donors
+    3. Prefer specific blood types first, fall back to universal O-type
+    4. Reserve small O-type buffer for future critical requests
+    5. Avoid zero-action when inventory and requests exist
 
     Returns: flattened allocation matrix (5x4 = 20 values)
     """
@@ -25,7 +27,6 @@ def greedy_policy(obs) -> List[int]:
 
     # ── Dead-zone guard ──────────────────────────────────────────────────────
     # If there is literally nothing in stock, no allocation is possible.
-    # Return zeros immediately rather than wasting cycles.
     if sum(inventories.values()) == 0:
         return [0] * (max_requests * 4)
 
@@ -50,12 +51,19 @@ def greedy_policy(obs) -> List[int]:
     if not active_reqs:
         return [0] * (max_requests * 4)
 
-    # Sort: urgency DESC, then wait_time DESC
-    active_reqs.sort(key=lambda x: (-x[2], -x[3]))
+    # ── ENHANCED PRIORITY SORTING ─────────────────────────────────────────────
+    # Sort by: urgency (DESC) → wait_time (DESC) → quantity (DESC)
+    # This ensures critical and older requests get prioritized
+    active_reqs.sort(key=lambda x: (-x[2], -x[3], -x[1]))
 
     # Build allocation matrix (5 × 4)
     allocation_matrix  = [[0] * 4 for _ in range(max_requests)]
     inventories_copy   = inventories.copy()
+
+    # ── RESERVE BUFFER ────────────────────────────────────────────────────────
+    # Keep small O-type reserve (universal donor) for critical cases
+    o_reserve = max(3, inventory_O // 5)  # Reserve 20% or minimum 3 units
+    available_o = max(0, inventories_copy['O'] - o_reserve)
 
     for orig_idx, quantity, urgency, wait_time, blood_type in active_reqs:
         if orig_idx >= max_requests:
@@ -64,22 +72,42 @@ def greedy_policy(obs) -> List[int]:
             continue
 
         compatible = get_compatible_donors(blood_type)
-
-        # ── KEY FIX: always try to fulfil the FULL quantity ──────────────────
-        # Never scale down.  Partial allocation still earns positive reward and
-        # avoids the penalty that unmet requests accumulate every step.
         remaining = quantity
 
+        # ── PRIORITIZED ALLOCATION ────────────────────────────────────────────
+        # For each compatible blood type (in order of preference)
         for donor in compatible:
             if remaining <= 0:
                 break
+            
             donor_idx = blood_types.index(donor)
-            available = inventories_copy[donor]
-            alloc     = min(remaining, available)
-            if alloc > 0:
-                allocation_matrix[orig_idx][donor_idx]  = alloc
-                inventories_copy[donor]                -= alloc
-                remaining                              -= alloc
+            
+            # Special handling: don't use reserved O-type unless necessary
+            if donor == 'O':
+                available = available_o
+            else:
+                available = inventories_copy[donor]
+            
+            allocate = min(remaining, available)
+            
+            if allocate > 0:
+                allocation_matrix[orig_idx][donor_idx] += allocate
+                inventories_copy[donor] -= allocate
+                if donor == 'O':
+                    available_o -= allocate
+                remaining -= allocate
+
+        # ── FALLBACK: Use reserved O-type if critical request unfulfilled ─────
+        # If this is a high-urgency request (urgency == 2) and still unfulfilled,
+        # dip into the O-type reserve
+        if remaining > 0 and urgency == 2 and o_reserve > 0:
+            o_idx = blood_types.index('O')
+            allocate = min(remaining, o_reserve)
+            if allocate > 0:
+                allocation_matrix[orig_idx][o_idx] += allocate
+                inventories_copy['O'] -= allocate
+                o_reserve -= allocate
+                remaining -= allocate
 
     # Flatten (row-major)
     flattened = []
